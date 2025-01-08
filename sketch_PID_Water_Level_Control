@@ -1,0 +1,115 @@
+#include <QuickPID.h>
+
+const int ENA_PIN = 14;
+const int IN1_PIN = 27;
+const int IN2_PIN = 26;
+const int PWM_FREQ = 5000;
+const int PWM_RESOLUTION = 8;
+const int TRIG_PIN = 5;
+const int ECHO_PIN = 18;
+
+const float SOUND_SPEED = 0.034;
+const int CONTAINER_HEIGHT = 19;
+
+const int MIN_SPEED = 0;
+const int MAX_SPEED = 100;
+const float MAINTAIN_SPEED = 40.0f;
+
+int iterationCount;
+float Kp = 30.0;
+float Ki = 0.5;
+float Kd = 5;
+
+float Input, Output, Setpoint;
+
+QuickPID myPID(&Input, &Output, &Setpoint);
+
+const int AVG_SAMPLES = 50;
+float waterHeightSamples[AVG_SAMPLES];
+int sampleIndex = 0;
+unsigned long lastAverageCalc = 0;
+const unsigned long AVERAGE_INTERVAL = 500;
+float averageWaterHeight = 0;
+
+void setup() {
+  ledcAttach(ENA_PIN, PWM_FREQ, PWM_RESOLUTION);
+  pinMode(IN1_PIN, OUTPUT);
+  pinMode(IN2_PIN, OUTPUT);
+  digitalWrite(IN1_PIN, HIGH);
+  digitalWrite(IN2_PIN, LOW);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  Serial.begin(115200);
+  Setpoint = 8.0;
+  myPID.SetTunings(Kp, Ki, Kd);
+  myPID.SetMode(myPID.Control::automatic);
+  myPID.SetOutputLimits(MIN_SPEED, MAX_SPEED);
+  myPID.SetSampleTimeUs(10000);
+  setMotorSpeed(MAX_SPEED);
+}
+
+float measureWaterHeight() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+  float distance = duration * SOUND_SPEED / 2;
+  float waterHeight = CONTAINER_HEIGHT - distance - 1;
+  if (waterHeight < 0) waterHeight = 0;
+  if (waterHeight > CONTAINER_HEIGHT) waterHeight = CONTAINER_HEIGHT;
+  return waterHeight;
+}
+
+void updateAverageWaterHeight(float currentHeight) {
+  waterHeightSamples[sampleIndex] = currentHeight;
+  sampleIndex = (sampleIndex + 1) % AVG_SAMPLES;
+  if (millis() - lastAverageCalc >= AVERAGE_INTERVAL) {
+    float sum = 0;
+    for (int i = 0; i < AVG_SAMPLES; i++) {
+      sum += waterHeightSamples[i];
+    }
+    averageWaterHeight = sum / AVG_SAMPLES;
+    lastAverageCalc = millis();
+  }
+}
+
+void setMotorSpeed(float percentage) {
+  percentage = constrain(percentage, (float)MIN_SPEED, (float)MAX_SPEED);
+  int pwmValue;
+  if (abs(Setpoint - Input) < 0.5) {
+    if (percentage < MAINTAIN_SPEED) {
+      percentage = MAINTAIN_SPEED;
+    }
+  }
+  if (percentage > 0) {
+    if (percentage < MAINTAIN_SPEED) {
+      pwmValue = map((int)percentage, 0, (int)MAINTAIN_SPEED, 200, 220);
+    } else {
+      pwmValue = map((int)percentage, (int)MAINTAIN_SPEED, 100, 220, 255);
+    }
+  } else {
+    pwmValue = 0;
+  }
+  ledcWrite(ENA_PIN, pwmValue);
+}
+
+void loop() {
+  float currentHeight = measureWaterHeight();
+  updateAverageWaterHeight(currentHeight);
+  Input = currentHeight;
+  myPID.Compute();
+  float error = abs(Setpoint - currentHeight);
+  if (error < 0.05) {
+    Output = (Output < MAINTAIN_SPEED) ? MAINTAIN_SPEED : Output;
+  }
+  setMotorSpeed(Output);
+  iterationCount++;
+  if (iterationCount >= 100) {
+    Serial.println(averageWaterHeight - Setpoint);
+    iterationCount = 0;
+  }
+  delay(10);
+}
+
